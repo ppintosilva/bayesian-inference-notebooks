@@ -1,0 +1,18 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.DS_Store
+*.zip
+*.log
+
+# ignore png images
+*.png
+
+*.aux
+*.out
+*.log
+*.toc
+
+*_cache*
+*_files*

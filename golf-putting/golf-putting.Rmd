@@ -1,0 +1,538 @@
+---
+title: 'Model building and expansion example: Golf putting'
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, include = TRUE)
+
+library(tidyverse)
+library(rstan)
+# library(cmdstanr)
+
+# register_knitr_engine()
+```
+
+## Input data
+
+Data from professional golfers on the proportion of successful putts as a function of distance from the hole:
+
+- $x$ is the distance from the hole (feet)
+- $n$ is the number of attemps
+- $y$ is the number of successful shots made
+- $p = \frac{y}{n}$ is the probability of success
+
+```{r golf}
+golf <- tibble::tribble(
+  ~x, ~n ,~y,
+  2 ,1443, 1346,
+  3 ,694 ,577,
+  4 ,455 ,337,
+  5 ,353 ,208,
+  6 ,272 ,149,
+  7 ,256 ,136,
+  8 ,240 ,111,
+  9 ,217 ,69,
+  10, 200, 67,
+  11, 237, 75,
+  12, 202, 52,
+  13, 192, 46,
+  14, 174, 54,
+  15, 167, 28,
+  16, 201, 27,
+  17, 195, 31,
+  18, 191, 33,
+  19, 147, 20,
+  20, 152, 24
+) %>%
+  mutate(p = y/n)
+
+golf  
+```
+
+```{r probability success}
+golf %>%
+  ggplot() +
+  aes(x = x, y = p) +
+  geom_point() +
+  xlab("Distance from hole (feet)") +
+  ylab("Probability of success") +
+  xlim(0,20) +
+  ylim(0,1) +
+  theme_bw()
+```
+
+
+## First model: Logistic regression
+
+A natural first model is logistic regression:
+
+$$
+y_j \sim \text{binomial} (n_j , p_j), \ \text{for} \ j = 1, \ldots, J \\
+p_j = \text{logit}^{-1}(a + bx_j) = 1/(1 + e^{a + bx_j})
+$$
+
+with stan model:
+
+```{stan first model def, echo = T, eval = F, output.var = "tmp"}
+// J observations of n (trials), y (successes) for each distance value x
+data {
+  int<lower=0> J;
+  int n[J];
+  int y[J];
+  vector[J] x;
+}
+
+// Parametrised by a and b
+parameters {
+  real a;
+  real b;
+}
+
+model {
+  vector[J] p;
+  
+  for (j in 1:J) {
+    p[j] = inv_logit(a + b*x[j]);
+  }
+  
+  y ~ binomial(n, p);
+}
+
+generated quantities {
+  vector[J] y_rep;
+  vector[J] p;
+  
+  for (j in 1:J) {
+    p[j] = inv_logit(a + b*x[j]);
+    y_rep[j] = binomial_rng(n[j], p[j]);
+  }
+}
+```
+
+where uniform priors are used due to the high number of trials for each $n_j$.
+
+```{r model 1 def}
+model1 <- "
+// J observations of n (trials), y (successes) for each distance value x
+data {
+  int<lower=0> J;
+  int n[J];
+  int y[J];
+  vector[J] x;
+}
+
+// Parametrised by a and b
+parameters {
+  real a;
+  real b;
+}
+
+model {
+  vector[J] p;
+  
+  for (j in 1:J) {
+    p[j] = inv_logit(a + b*x[j]);
+  }
+  
+  y ~ binomial(n, p);
+}
+
+generated quantities {
+  vector[J] y_rep;
+  vector[J] p;
+  
+  for (j in 1:J) {
+    p[j] = inv_logit(a + b*x[j]);
+    y_rep[j] = binomial_rng(n[j], p[j]);
+  }
+}
+"
+```
+
+```{r run model 1, cache = T}
+fit1 <- rstan::stan(
+  model_code = model1,
+  chains = 4,
+  iter = 2000,
+  data = list(
+    J = nrow(golf), x = golf$x, y = golf$y, n = golf$n
+  )
+)
+```
+
+We can posterior 
+
+
+```{r posterior params summary 1}
+fit1_yrep <- extract(fit1, pars = "y_rep")[[1]]
+
+fit1_draws <- posterior::as_draws(fit1_yrep)
+
+fit1_summary <- posterior::summarise_draws(fit1_draws) %>%
+  select(mean, sd) %>%
+  rename(ypred_mean = mean, ypred_sd = sd)
+
+
+fit1_params <- extract(fit1, pars = c("a", "b")) %>% as_tibble()
+
+fit1_params_summary <- fit1_params %>%
+  summarise(
+    across(everything(), mean)
+  )
+
+fit1_params_summary
+```
+
+```{r logistic regression results}
+logistic <- function(x, a, b) 1/(1 + exp(-a - b*x))
+
+plot1 <- bind_cols(
+  golf,
+  fit1_summary
+) %>%
+  mutate(
+    across(starts_with("y"), ~ .x/n)
+  ) %>%
+  ggplot() +
+  geom_point(
+    aes(x = x, y = y, color = "data"),
+    size = 4
+  ) +
+  geom_function(
+    fun = logistic,
+    args = list(a = fit1_params_summary$a, b = fit1_params_summary$b),
+    aes(color = "LR model")
+  ) +
+  geom_pointrange(
+    aes(x = x, 
+        y = ypred_mean, 
+        ymin = ypred_mean - ypred_sd,
+        ymax = ypred_mean + ypred_sd, 
+        color = "LR model"
+    ),
+    size = .50
+  ) +
+  xlab("Distance from hole (feet)") +
+  ylab("Probability of success") +
+  xlim(0,22) +
+  ylim(0,1) +
+  scale_color_manual(
+    values = c(
+      "data" = "blue",
+      "LR model" = "green"
+    )
+  ) +
+  theme_bw()
+
+plot1
+```
+
+## Second model: Considering geometry
+
+The figure below shows a simplified sketch of a golf shot:
+
+![Simple geometrical model of golf putting.](golf-geometry.png)
+
+The dotted lines represent the (maximum) angle which the ball of radius $r$ must be hit
+so that it falls within the hole of radius $R$, being hit from a distance of $x$ feet.
+This maximum angle is:
+
+$$
+\text{sin}^{-1} \Bigg( \frac{R - r}{x} \Bigg)
+$$
+
+We assume that the golfer attempts to hit the ball straight but that many small
+factors interfere with this goal. Hence, we assume the actual angle $k$
+follows a normal distribution centered at 0 with some standard deviation $\sigma$.
+
+The probability that the ball goes inside the all is equal to the probability that
+the angle is below the maximum threshold, that is,
+
+$$
+\text{Pr} \Big( k < \text{sin}^{-1} \big((R - r)/x \big) \Big) = 2 \Phi \Bigg( \frac{\text{sin}^{-1} \big((R - r)/x \big)}{\sigma} \Bigg) - 1
+$$
+transforming the original model into:
+
+$$
+y_j \sim \text{binomial} (n_j , p_j), \ \text{for} \ j = 1, \ldots, J \\
+p_j = 2 \Phi \Bigg( \frac{\text{sin}^{-1} \big((R - r)/x \big)}{\sigma} \Bigg) - 1
+$$
+
+with stan model:
+
+```{stan second model def, echo = T, eval = F, output.var="tmp2"}
+// J observations of n (trials), y (successes) for each distance value x
+data {
+  int<lower=0> J;
+  int n[J];
+  int y[J];
+  vector[J] x;
+  real r;
+  real R;
+}
+
+// Parametrised by a and b
+parameters {
+  real sigma;
+}
+
+model {
+  vector[J] p;
+  
+  for (j in 1:J) {
+    p[j] = 2*Phi(asin((R-r)/x[j]) / sigma) - 1;
+  }
+  
+  y ~ binomial(n, p);
+}
+
+generated quantities {
+  real sigma_degrees;
+  vector[J] y_rep;
+  vector[J] p;
+  
+  sigma_degrees = (180/pi())*sigma;
+  
+  for (j in 1:J) {
+    p[j] = 2*Phi(asin((R-r)/x[j])/sigma) - 1;
+    y_rep[j] = binomial_rng(n[j], p[j]);
+  }
+}
+```
+
+
+```{r model 2 def}
+model2 <- "
+// J observations of n (trials), y (successes) for each distance value x
+data {
+  int<lower=0> J;
+  int n[J];
+  int y[J];
+  vector[J] x;
+  real r;
+  real R;
+}
+
+// Parametrised by a and b
+parameters {
+  real sigma;
+}
+
+model {
+  vector[J] p;
+  
+  for (j in 1:J) {
+    p[j] = 2*Phi(asin((R-r)/x[j]) / sigma) - 1;
+  }
+  
+  y ~ binomial(n, p);
+}
+
+generated quantities {
+  real sigma_degrees;
+  vector[J] y_rep;
+  vector[J] p;
+  
+  sigma_degrees = (180/pi())*sigma;
+  
+  for (j in 1:J) {
+    p[j] = 2*Phi(asin((R-r)/x[j])/sigma) - 1;
+    y_rep[j] = binomial_rng(n[j], p[j]);
+  }
+}
+"
+```
+
+```{r run model 2, cache = T, echo = T}
+r_feet <- 1.68/2 * 0.0833 # inches to feet
+R_feet <- 4.25/2 * 0.0833 # inches to feet
+
+fit2 <- stan(
+  model_code = model2,
+  chains = 4,
+  iter = 2000,
+  data = list(
+    J = nrow(golf), x = golf$x, y = golf$y, n = golf$n, r = r_feet, R = R_feet
+  )
+)
+```
+
+We can posterior 
+
+
+```{r posterior params summary 2}
+fit2_quant <- extract(fit2)
+
+fit2_draws <- posterior::as_draws(fit2_quant$y_rep)
+
+fit2_summary <- posterior::summarise_draws(fit2_draws) %>%
+  select(mean, sd) %>%
+  rename(ypred_mean = mean, ypred_sd = sd)
+
+fit2_params <- bind_cols(
+  fit2_quant$sigma %>% tibble(sigma = .),
+  fit2_quant$sigma_degrees %>% tibble(sigma_degrees = .)
+)
+
+fit2_params_summary <- fit2_params %>%
+  summarise(
+    across(everything(), mean)
+  )
+
+fit2_params_summary
+```
+
+```{r posterior draws 2}
+pr_angle <- function(x, sigma, r = r_feet, R = R_feet) {
+  2*pnorm(asin((R-r)/x)/sigma) - 1
+}
+
+plot2 <- bind_cols(
+  golf
+) %>%
+  mutate(
+    across(starts_with("y"), ~ .x/n)
+  ) %>%
+  ggplot() +
+  geom_point(
+    aes(x = x, y = y, color = "data"),
+    size = 4
+  ) +
+  geom_function(
+    fun = logistic,
+    args = list(a = fit1_params_summary$a, b = fit1_params_summary$b),
+    aes(color = "LR model")
+  ) +
+  geom_function(
+    fun = pr_angle,
+    args = list(sigma = fit2_params_summary$sigma),
+    aes(color = "Geom model")
+  ) +
+  xlab("Distance from hole (feet)") +
+  ylab("Probability of success") +
+  xlim(0,22) +
+  ylim(0,1) +
+  scale_color_manual(
+    values = c(
+      "data" = "blue",
+      "LR model" = "green",
+      "Geom model" = "black"
+    )
+  ) +
+theme_bw()
+
+plot2
+```
+
+
+### New golf data
+
+```{r new golf data}
+newgolf <- tibble::tribble(
+  ~x, ~n, ~y,
+  0.28 ,45198 , 45183,
+  0.97 ,183020, 182899,
+  1.93 ,169503, 168594,
+  2.92 ,113094, 108953,
+  3.93 ,73855 , 64740,
+  4.94 ,53659 , 41106,
+  5.94 ,42991 , 28205,
+  6.95 ,37050 , 21334,
+  7.95 ,33275 , 16615,
+  8.95 ,30836 , 13503,
+  9.95 ,28637 , 11060,
+  10.95, 26239, 9032,
+  11.95, 24636, 7687,
+  12.95, 22876, 6432,
+  14.43, 41267, 9813,
+  16.43, 35712, 7196,
+  18.44, 31573, 5290,
+  20.44, 28280, 4086,
+  21.95, 13238, 1642,
+  24.39, 46570, 4767,
+  28.40, 38422, 2980,
+  32.39, 31641, 1996,
+  36.39, 25604, 1327,
+  40.37, 20366, 834,
+  44.38, 15977, 559,
+  48.37, 11770, 311,
+  52.36, 8708 , 231,
+  57.25, 8878 , 204,
+  63.23, 5492 , 103,
+  69.18, 3087 , 35,
+  75.19, 1742 , 24
+)
+newgolf %>% print(n=31)
+```
+
+```{r plot new data}
+
+bind_rows(
+  golf %>% mutate(dataset = "old"),
+  newgolf %>% mutate(dataset = "new")
+) %>%
+  mutate(dataset = factor(dataset, levels = c("old", "new"))) %>%
+    mutate(
+    across(starts_with("y"), ~ .x/n)
+  ) %>%
+  ggplot() +
+  geom_point(
+    aes(x = x, y = y, color = dataset),
+    size = 2
+  ) +
+  geom_function(
+    fun = pr_angle,
+    args = list(sigma = fit2_params_summary$sigma),
+    aes(color = "old")
+  ) +
+  xlab("Distance from hole (feet)") +
+  ylab("Probability of success") +
+  xlim(0,80) +
+  ylim(0,1) +
+  scale_color_manual(
+    values = c(
+      "old" = "blue",
+      "new" = "red"
+    )
+  ) +
+theme_bw()
+
+```
+
+Geometrical model on new data over-predicts the probability of success for 
+longer shots (distance greater than 20 feet) and under-predicts the probability
+of success for putts under 20 feet.
+
+These differences are perhaps due to measurement error (distance is more
+precisely measured on new data and probably rounded up in old data) or
+increase in player performance over the years.
+
+
+### Model 3: Accounting for hitting force
+
+The angle is not the only factor that a golfer must control for when
+hitting the ball; it also needs to hit the ball with the right amount of force.
+
+A second parameter is introduced to account for the golfer's control over
+distance. Suppose $u$ indicates how far the ball travels when hit. Then, a ball
+goes in if (a) the angle is within the threshold and (b) $u$ is in
+range $[x, x+3]$ (the ball is hit hard enough to arrive at the hole but not
+hard enough that it would go too far).
+
+Broadie's  model assumes that a golfer will try to hit the ball one foot past
+the hole but with a multiplicative error in the shot's potential distance, so
+that $u = (x + 1) \cdot (1 + \epsilon)$, where the error term $\epsilon$ is
+normally distributed with mean 0 and standard deviation
+$\sigma_{\text{distance}}$.
+
+Formally the model for $u$ is defined as:
+
+$$
+u \sim \text{Normal}(x + 1, (x+1))
+$$
+
+### Model 4: Expanding model 3 with a fudge factor
+
